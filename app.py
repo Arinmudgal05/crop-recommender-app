@@ -81,7 +81,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ---------------- feature builder for single row ----------------
+# ---------------- feature builder for single row (fixed: drop pH_bucket string) ----------------
 def build_row_features(N,P,K,temperature,humidity,ph,rainfall) -> pd.DataFrame:
     row = pd.DataFrame([{
         "N": N,
@@ -105,14 +105,19 @@ def build_row_features(N,P,K,temperature,humidity,ph,rainfall) -> pd.DataFrame:
     row['NPK_sum'] = row[['N','P','K']].sum(axis=1)
     row['NPK_mean'] = row[['N','P','K']].mean(axis=1)
 
-    # pH bucket and dummies
+    # pH bucket -> one-hot expected by model
     row['pH_bucket'] = pd.cut(row['ph'], bins=[-999,5.5,6.5,7.5,999],
                               labels=['acidic','slightly_acidic','neutral','alkaline'])
     pH_dummies = pd.get_dummies(row['pH_bucket'])
-    # Normalize names to match training (ensure columns exist)
+
+    # one-hot encoded columns expected by model (ensure presence)
     for col in ['acidic','slightly_acidic','neutral','alkaline']:
-        cname = f"pH_{col}"  # eg pH_acidic
-        row[cname] = int(col in pH_dummies.columns and pH_dummies.get(col).iloc[0]==1)
+        cname = f"pH_{col}"
+        row[cname] = int(col in pH_dummies.columns and pH_dummies.get(col).iloc[0] == 1)
+
+    # REMOVE the raw string feature to avoid CatBoost/string errors
+    if "pH_bucket" in row.columns:
+        row = row.drop(columns=["pH_bucket"])
 
     # season/month placeholders
     row['month'] = pd.NA
@@ -141,11 +146,6 @@ def build_row_features(N,P,K,temperature,humidity,ph,rainfall) -> pd.DataFrame:
 
 # ---------------- align + predict helper ----------------
 def align_and_predict(row: pd.DataFrame) -> Tuple[str, Optional[float], dict]:
-    """
-    Aligns a single-row DataFrame to model.feature_names_in_ (if present),
-    applies scaler to numeric features using scaler.feature_names_in_ (if available),
-    then calls model.predict / predict_proba and returns (crop_name, confidence, prob_vector_dict)
-    """
     if model is None:
         raise RuntimeError("Model not loaded. Check model_model.joblib in repo root.")
 
@@ -154,43 +154,40 @@ def align_and_predict(row: pd.DataFrame) -> Tuple[str, Optional[float], dict]:
     if hasattr(model, "feature_names_in_"):
         required = list(model.feature_names_in_)
     else:
-        # Try to use X_final or guess columns from row
         required = list(row.columns)
 
-    # Build an input vector for the model
-    input_row = pd.DataFrame(columns=required, index=[0])
-    # Fill with zeros by default
-    input_row = input_row.fillna(0)
+    # Build an input vector for the model with required columns (default 0)
+    input_row = pd.DataFrame(columns=required, index=[0]).fillna(0)
 
-    # If scaler exists and has feature names, scale those features
+    # If scaler exists and has feature names, scale those features first
     if scaler is not None and hasattr(scaler, "feature_names_in_"):
         scaler_names = list(scaler.feature_names_in_)
-        # ensure all scaler_names present in row, otherwise add zeros
         for cname in scaler_names:
             if cname not in row.columns:
                 row[cname] = 0
-        # get numeric array in scaler order and transform
-        scaled_vals = scaler.transform(row[scaler_names])
-        # place scaled values into input_row for those columns (if they are part of required)
-        for idx, cname in enumerate(scaler_names):
-            if cname in input_row.columns:
-                input_row.at[0, cname] = float(scaled_vals[0, idx])
-    else:
-        # No scaler feature names available — attempt to scale any numeric columns that exist in scaler.mean_
-        if scaler is not None and hasattr(scaler, "mean_"):
-            # try to infer order by intersecting scaler.mean_ length and numeric columns
-            # fallback: do not scale (keep raw) to avoid mismatch
-            pass
+        try:
+            scaled_vals = scaler.transform(row[scaler_names])
+            for idx, cname in enumerate(scaler_names):
+                if cname in input_row.columns:
+                    input_row.at[0, cname] = float(scaled_vals[0, idx])
+        except Exception:
+            # fallback: do not crash, keep raw numeric values
+            for cname in scaler_names:
+                if cname in input_row.columns and cname in row.columns:
+                    try:
+                        input_row.at[0, cname] = float(row.at[0, cname])
+                    except Exception:
+                        input_row.at[0, cname] = 0.0
 
-    # Now fill remaining columns from row (non-scaled ones and any not covered above)
+    # Fill remaining columns from row (non-scaled ones)
     for col in required:
-        if col in row.columns and (pd.isna(input_row.at[0, col]) or input_row.at[0,col]==0):
+        if col in row.columns and (pd.isna(input_row.at[0, col]) or input_row.at[0, col] == 0):
             try:
                 input_row.at[0, col] = float(row.iloc[0][col])
             except Exception:
                 input_row.at[0, col] = row.iloc[0][col]
 
-    # As a last step, ensure numeric columns are numeric type (model may expect floats)
+    # Ensure numeric columns are numeric where possible
     for c in input_row.columns:
         try:
             input_row[c] = pd.to_numeric(input_row[c], errors='ignore')
@@ -207,19 +204,16 @@ def align_and_predict(row: pd.DataFrame) -> Tuple[str, Optional[float], dict]:
         if label_encoder is not None:
             pred_label = label_encoder.inverse_transform([pred_idx])[0]
     except Exception:
-        # If inverse_transform fails, maybe model outputs string labels already
         pred_label = pred_idx
 
-    # Probabilities (top-3)
+    # Probabilities -> dict
     prob = None
     prob_dict = {}
     try:
         if hasattr(model, "predict_proba"):
             probs = model.predict_proba(input_row)[0]
-            # model.classes_ aligned with probs
             classes = getattr(model, "classes_", None)
             if classes is not None:
-                # If classes are encoded numbers, decode with label_encoder if present
                 decoded = []
                 for c in classes:
                     try:
@@ -229,14 +223,11 @@ def align_and_predict(row: pd.DataFrame) -> Tuple[str, Optional[float], dict]:
                             decoded.append(c)
                     except Exception:
                         decoded.append(c)
-                # build dict
                 for cname, p in zip(decoded, probs):
                     prob_dict[cname] = float(p)
             else:
-                # fallback: enumerate
                 for i, p in enumerate(probs):
                     prob_dict[str(i)] = float(p)
-            # best prob
             if prob_dict:
                 prob = max(prob_dict.values())
     except Exception:
@@ -291,7 +282,6 @@ if submit:
         row = build_row_features(N,P,K,temp,hum,ph,rain)
         if model is not None:
             pred_label, prob, prob_dict = align_and_predict(row)
-            # fertilizer mapping (simple)
             fertilizer_map = {
                 'rice': ['Urea','DAP','MOP','Zinc Sulphate'],
                 'maize': ['Urea','SSP','Potash','Zinc Sulphate'],
@@ -337,4 +327,3 @@ if submit:
     st.snow()
 
     st.code(f"Predicted Crop: {str(pred_label).upper()}  |  Fertilizers: {', '.join(ferts)}", language='text')
-

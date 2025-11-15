@@ -86,6 +86,7 @@ with right:
 st.markdown("</div>", unsafe_allow_html=True)
 
 
+
 # ---------- Prediction flow with animation (fixed final) ----------
 if submit:
     # placeholders for status/progress
@@ -133,6 +134,7 @@ if submit:
     st.code(f"Predicted Crop: {crop.upper()}  |  Confidence: {int(conf*100)}%  |  Fertilizers: {', '.join(ferts)}", language='text')
 
 
+
     # 2) Compute prediction (placeholder function for now)
     crop, ferts, conf = placeholder_predict(N,P,K,temp,hum,ph,rain)
 
@@ -161,6 +163,7 @@ if submit:
     st.code(f"Predicted Crop: {crop.upper()}  |  Confidence: {int(conf*100)}%  |  Fertilizers: {', '.join(ferts)}", language='text')
 
     # note: here we will later replace placeholder_predict with model.predict(...)
+
 
 
 

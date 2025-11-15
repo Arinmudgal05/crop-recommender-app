@@ -144,61 +144,122 @@ def build_row_features(N,P,K,temperature,humidity,ph,rainfall) -> pd.DataFrame:
             row[c] = pd.to_numeric(row[c], errors='coerce').fillna(0)
     return row
 
-# ---------------- align + predict helper ----------------
+
+# ----------  align_and_predict  ----------
 def align_and_predict(row: pd.DataFrame) -> Tuple[str, Optional[float], dict]:
+    """
+    Align a single-row DataFrame to model.feature_names_in_ (if present),
+    apply scaler (if available) in the scaler.feature_names_in_ order,
+    and predict. Returns (pred_label, best_prob, prob_dict).
+    """
     if model is None:
         raise RuntimeError("Model not loaded. Check model_model.joblib in repo root.")
 
-    # Determine required feature order from model if available
-    required = None
+    # Helper to find a matching value in row for a required column name
+    def find_value_for(req: str, src_row: pd.DataFrame):
+        # 1) exact match
+        if req in src_row.columns:
+            return src_row.at[0, req]
+
+        # 2) case-insensitive exact match
+        lower_map = {c.lower(): c for c in src_row.columns}
+        if req.lower() in lower_map:
+            return src_row.at[0, lower_map[req.lower()]]
+
+        # 3) normalized match (replace underscores/spaces/dashes)
+        def norm(s): return s.replace('_', '').replace(' ', '').replace('-', '').lower()
+        norm_req = norm(req)
+        for c in src_row.columns:
+            if norm(c) == norm_req:
+                return src_row.at[0, c]
+
+        # 4) substring match (req contains key or key contains req)
+        #    e.g. req 'npk' should match 'NPK_sum' etc.
+        for c in src_row.columns:
+            if norm_req in norm(c) or norm(c) in norm_req:
+                return src_row.at[0, c]
+
+        # 5) fallback: try common alias sets (small explicit map)
+        alias_map = {
+            'n_p': ['n_p', 'n_p_ratio', 'n_p'],
+            'n_p_ratio': ['n_p_ratio', 'N_P'],
+            'n_k_ratio': ['n_k_ratio', 'N_K'],
+            'p_k_ratio': ['p_k_ratio', 'P_K'],
+            'npk_sum': ['npk_sum', 'NPK_sum', 'NPKsum'],
+            'npk_mean': ['npk_mean', 'NPK_mean', 'NPKmean'],
+            'ph_acidic': ['pH_acidic', 'ph_acidic'],
+            'ph_slightly_acidic': ['pH_slightly_acidic', 'ph_slightly_acidic'],
+            'ph_neutral': ['pH_neutral', 'ph_neutral'],
+            'ph_alkaline': ['pH_alkaline', 'ph_alkaline']
+        }
+        for k, aliases in alias_map.items():
+            if norm_req == k:
+                for a in aliases:
+                    if a in src_row.columns:
+                        return src_row.at[0, a]
+
+        # 6) last resort: return 0
+        return 0
+
+    # Determine required columns from model or fallback to row columns
     if hasattr(model, "feature_names_in_"):
         required = list(model.feature_names_in_)
     else:
         required = list(row.columns)
 
-    # Build an input vector for the model with required columns (default 0)
+    # Create input row exactly with required columns (default 0)
     input_row = pd.DataFrame(columns=required, index=[0]).fillna(0)
 
-    # If scaler exists and has feature names, scale those features first
+    # If scaler is present and has feature names, use scaler to transform those columns (in scaler order)
     if scaler is not None and hasattr(scaler, "feature_names_in_"):
         scaler_names = list(scaler.feature_names_in_)
-        for cname in scaler_names:
-            if cname not in row.columns:
-                row[cname] = 0
+        # Ensure scaler_names exist in row (create with zeros if missing)
+        for sname in scaler_names:
+            if sname not in row.columns:
+                row[sname] = 0
+        # Prepare numeric array in scaler order and transform safely
         try:
-            scaled_vals = scaler.transform(row[scaler_names])
-            for idx, cname in enumerate(scaler_names):
-                if cname in input_row.columns:
-                    input_row.at[0, cname] = float(scaled_vals[0, idx])
+            scaled_arr = scaler.transform(row[scaler_names])
+            # Map scaled values into input_row for those columns if they are required by model
+            for i, sname in enumerate(scaler_names):
+                if sname in input_row.columns:
+                    input_row.at[0, sname] = float(scaled_arr[0, i])
         except Exception:
-            # fallback: do not crash, keep raw numeric values
-            for cname in scaler_names:
-                if cname in input_row.columns and cname in row.columns:
+            # If scaling fails, fall back to copying raw values (best-effort)
+            for sname in scaler_names:
+                if sname in input_row.columns and sname in row.columns:
                     try:
-                        input_row.at[0, cname] = float(row.at[0, cname])
+                        input_row.at[0, sname] = float(row.at[0, sname])
                     except Exception:
-                        input_row.at[0, cname] = 0.0
+                        input_row.at[0, sname] = 0.0
 
-    # Fill remaining columns from row (non-scaled ones)
+    # Fill remaining required columns using the finder function
     for col in required:
-        if col in row.columns and (pd.isna(input_row.at[0, col]) or input_row.at[0, col] == 0):
-            try:
-                input_row.at[0, col] = float(row.iloc[0][col])
-            except Exception:
-                input_row.at[0, col] = row.iloc[0][col]
+        # if already filled (non-zero), skip
+        if col in input_row.columns and input_row.at[0, col] not in (None, 0, 0.0):
+            continue
+        val = find_value_for(col, row)
+        # safe cast numeric values
+        try:
+            input_row.at[0, col] = float(val)
+        except Exception:
+            input_row.at[0, col] = val
 
-    # Ensure numeric columns are numeric where possible
+    # Ensure numeric columns where possible
     for c in input_row.columns:
         try:
             input_row[c] = pd.to_numeric(input_row[c], errors='ignore')
         except Exception:
             pass
 
+    # Final check: reorder columns exactly as model expects
+    input_row = input_row[required]
+
     # Predict
     preds = model.predict(input_row)
     pred_idx = preds[0]
 
-    # Map label back via label_encoder if available
+    # Map back to label if label_encoder available
     pred_label = pred_idx
     try:
         if label_encoder is not None:
@@ -206,7 +267,7 @@ def align_and_predict(row: pd.DataFrame) -> Tuple[str, Optional[float], dict]:
     except Exception:
         pred_label = pred_idx
 
-    # Probabilities -> dict
+    # Probabilities dict
     prob = None
     prob_dict = {}
     try:
@@ -234,6 +295,7 @@ def align_and_predict(row: pd.DataFrame) -> Tuple[str, Optional[float], dict]:
         prob = None
 
     return pred_label, prob, prob_dict
+
 
 # ---------------- App layout & logic ----------------
 st.markdown("<div class='main-card'>", unsafe_allow_html=True)
@@ -327,3 +389,4 @@ if submit:
     st.snow()
 
     st.code(f"Predicted Crop: {str(pred_label).upper()}  |  Fertilizers: {', '.join(ferts)}", language='text')
+

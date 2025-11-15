@@ -85,20 +85,54 @@ with right:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------- Prediction flow with animation ----------
+
+# ---------- Prediction flow with animation  ----------
 if submit:
-    # 1) Play searching animation + progress
-    anim_placeholder = st.empty()
-    prog = st.empty()
+    # small placeholders for text/progress so layout remains tidy
     status_text = st.empty()
-    anim_placeholder.st_lottie(anim_searching, height=200)
+    prog = st.empty()
+
+    # show searching animation (use st_lottie directly)
+    st_lottie(anim_searching, height=200, key="anim_search")
+
     status_text.markdown("<b>Analysing soil & weather data...</b>", unsafe_allow_html=True)
+
+    # progress bar animation
     p_bar = prog.progress(0)
     for i in range(0, 101, 7):
-        p_bar.progress(min(i,100))
-        time.sleep(0.06 + random.random()*0.03)
+        p_bar.progress(min(i, 100))
+        time.sleep(0.06 + random.random() * 0.03)
     p_bar.progress(100)
     time.sleep(0.15)
+
+    # compute prediction (placeholder function for now)
+    crop, ferts, conf = placeholder_predict(N, P, K, temp, hum, ph, rain)
+
+    # show success animation (below the searching animation)
+    # note: we don't remove the searching animation (Streamlit doesn't provide a direct handle for st_lottie),
+    # but we display the success animation underneath for a clear visual result.
+    if anim_success:
+        st_lottie(anim_success, height=180, key="anim_success")
+
+    # show result with a nice large card
+    st.markdown("<div class='result-card'>", unsafe_allow_html=True)
+    st.markdown(f"<div class='centered'><div class='big-crop'>{crop.upper()}</div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='confidence'>Confidence: {int(conf*100)}%</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # fertilizer pills (styled)
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='sub-card'><b>Recommended Fertilizers:</b><br>" + render_fertilizer_pills(ferts) + "</div>", unsafe_allow_html=True)
+
+    # celebration
+    st.balloons()
+    st.snow()
+
+    # small shareable summary box (copyable)
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    st.code(f"Predicted Crop: {crop.upper()}  |  Confidence: {int(conf*100)}%  |  Fertilizers: {', '.join(ferts)}", language='text')
+
 
     # 2) Compute prediction (placeholder function for now)
     crop, ferts, conf = placeholder_predict(N,P,K,temp,hum,ph,rain)
@@ -128,4 +162,5 @@ if submit:
     st.code(f"Predicted Crop: {crop.upper()}  |  Confidence: {int(conf*100)}%  |  Fertilizers: {', '.join(ferts)}", language='text')
 
     # note: here we will later replace placeholder_predict with model.predict(...)
+
 

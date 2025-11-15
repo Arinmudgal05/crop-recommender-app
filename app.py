@@ -86,14 +86,15 @@ with right:
 st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ---------- Prediction flow with animation  ----------
+# ---------- Prediction flow with animation (fixed final) ----------
 if submit:
-    # small placeholders for text/progress so layout remains tidy
+    # placeholders for status/progress
     status_text = st.empty()
     prog = st.empty()
 
-    # show searching animation (use st_lottie directly)
-    st_lottie(anim_searching, height=200, key="anim_search")
+    # show searching animation (call st_lottie directly)
+    if anim_searching:
+        st_lottie(anim_searching, height=200, key="anim_search")
 
     status_text.markdown("<b>Analysing soil & weather data...</b>", unsafe_allow_html=True)
 
@@ -108,9 +109,7 @@ if submit:
     # compute prediction (placeholder function for now)
     crop, ferts, conf = placeholder_predict(N, P, K, temp, hum, ph, rain)
 
-    # show success animation (below the searching animation)
-    # note: we don't remove the searching animation (Streamlit doesn't provide a direct handle for st_lottie),
-    # but we display the success animation underneath for a clear visual result.
+    # show success animation (below searching animation)
     if anim_success:
         st_lottie(anim_success, height=180, key="anim_success")
 
@@ -162,5 +161,6 @@ if submit:
     st.code(f"Predicted Crop: {crop.upper()}  |  Confidence: {int(conf*100)}%  |  Fertilizers: {', '.join(ferts)}", language='text')
 
     # note: here we will later replace placeholder_predict with model.predict(...)
+
 
 
